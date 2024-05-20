@@ -10,9 +10,29 @@ fi
 
 chown -R sdk:sdk /home/sdk
 
-# Fix up SDK repo configuration to use the new coreos-overlay name.
-sed -i -r 's/^\[coreos\]/[coreos-overlay]/' /etc/portage/repos.conf/coreos.conf 2>/dev/null
-sed -i -r '/^masters =/s/\bcoreos(\s|$)/coreos-overlay\1/g' /usr/local/portage/crossdev/metadata/layout.conf 2>/dev/null
+# Fix up SDK repo configuration to use the new layout.
+cat > "/etc/portage/repos.conf/gentoo-subset.conf" <<EOF
+[DEFAULT]
+main-repo = gentoo-subset
+
+[gentoo-subset]
+location = /mnt/host/source/src/scripts/repos/gentoo-subset
+EOF
+cat > "/etc/portage/repos.conf/flatcar-overlay.conf" <<EOF
+[flatcar-overlay]
+location = /mnt/host/source/src/scripts/repos/flatcar-overlay
+EOF
+rm -f /etc/portage/repos.conf/coreos.conf
+
+LINK=$(readlink /etc/portage/make.profile)
+ln -sfT "${LINK/\/third_party\/coreos-overlay\///scripts/repos/flatcar-overlay/}" /etc/portage/make.profile
+LINK=$(readlink /etc/portage/patches)
+ln -sfT "${LINK/\/third_party\/coreos-overlay\///scripts/repos/flatcar-overlay/}" /etc/portage/patches
+
+sed -i -r \
+    -e '/^masters =/s/\bportage-stable(\s|$)/gentoo-subset\1/g' \
+    -e '/^masters =/s/\bcoreos(-overlay)?(\s|$)/flatcar-overlay\2/g' \
+    /usr/local/portage/crossdev/metadata/layout.conf 2>/dev/null
 
 # Check if the OS image version we're working on is newer than
 #  the SDK container version and if it is, update the boards

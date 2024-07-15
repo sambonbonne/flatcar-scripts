@@ -7,6 +7,9 @@
 # Gentoo upstream package stabilisation
 # (the following packages are "unstable" upstream; we're stabilising these)
 
+# Need the cet USE flag handling fix.
+=sys-devel/crossdev-20240702 ~amd64 ~arm64
+
 # Catalyst 4 is not stable yet, but earlier versions are masked now.
 dev-util/catalyst ~amd64 ~arm64
 

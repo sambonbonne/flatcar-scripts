@@ -22,6 +22,10 @@ DEFINE_string disk_image "" \
   "The disk image containing the EFI System partition."
 DEFINE_boolean verity ${FLAGS_FALSE} \
   "Indicates that boot commands should enable dm-verity."
+DEFINE_string root_hash "" \
+  "The file containing the dm-verity root hash."
+DEFINE_integer usr_size "" \
+  "The size of the usr filesystem in bytes."
 DEFINE_string copy_efi_grub "" \
   "Copy the EFI GRUB image to the specified path."
 DEFINE_string copy_shim "" \
@@ -31,6 +35,10 @@ DEFINE_string copy_shim "" \
 FLAGS "$@" || exit 1
 eval set -- "${FLAGS_ARGV}"
 switch_to_strict_mode
+
+if [[ ${FLAGS_verity} -eq ${FLAGS_TRUE} && ( -z ${FLAGS_root_hash} || -z ${FLAGS_usr_size} ) ]]; then
+    die_notrace "Enabling dm-verity requires the --root_hash and --usr_size flags"
+fi
 
 # must be sourced after flags are parsed.
 . "${BUILD_LIBRARY_DIR}/toolchain_util.sh" || exit 1
@@ -160,12 +168,12 @@ if [[ ! -f "${ESP_DIR}/flatcar/grub/grub.cfg.tar" ]]; then
     if [[ ${FLAGS_verity} -eq ${FLAGS_TRUE} ]]; then
       # use dm-verity for /usr
       cat "${BUILD_LIBRARY_DIR}/grub.cfg" | \
-        sed 's/@@MOUNTUSR@@/mount.usr=\/dev\/mapper\/usr verity.usr/' > \
+        sed "s/@@MOUNTUSR@@/mount.usr=\/dev\/mapper\/usr systemd.verity_usr_data=\$usr_ref systemd.verity_usr_hash=\$usr_ref systemd.verity_usr_options=hash-offset=${FLAGS_usr_size} usrhash=$(< "${FLAGS_root_hash}")/" > \
         "${GRUB_TEMP_DIR}/grub.cfg"
     else
       # uses standard systemd /usr mount
       cat "${BUILD_LIBRARY_DIR}/grub.cfg" | \
-        sed 's/@@MOUNTUSR@@/mount.usr/' > "${GRUB_TEMP_DIR}/grub.cfg"
+        sed 's/@@MOUNTUSR@@/mount.usr=\$usr_ref/' > "${GRUB_TEMP_DIR}/grub.cfg"
     fi
 
     sudo tar cf "${ESP_DIR}/flatcar/grub/grub.cfg.tar" \

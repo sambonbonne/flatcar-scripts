@@ -624,21 +624,6 @@ finish_image() {
     disable_read_write="${FLAGS_enable_rootfs_verification}"
   fi
 
-  # Only enable rootfs verification on supported boards.
-  case "${FLAGS_board}" in
-    amd64-usr) verity_offset=64 ;;
-    arm64-usr) verity_offset=512 ;;
-    *) disable_read_write=${FLAGS_FALSE} ;;
-  esac
-
-  # Copy kernel to the /boot partition to support dm-verity boots by embedding
-  # the hash of the /usr partition into the kernel.
-  # Remove the kernel from the /usr partition to save space.
-  sudo mkdir -p "${root_fs_dir}/boot/flatcar"
-  sudo cp "${root_fs_dir}/usr/boot/vmlinuz" \
-       "${root_fs_dir}/boot/flatcar/vmlinuz-a"
-  sudo rm "${root_fs_dir}/usr/boot/vmlinuz"*
-
   # Forbid dynamic user ID allocation because we want stable IDs
   local found=""
   # We want to forbid "-", "X:-" (.*:-), "-:X" (-:.*), "/X" (/.*)
@@ -694,6 +679,7 @@ finish_image() {
 
     # Create first-boot flag for grub and Ignition
     info "Writing first-boot flag"
+    sudo mkdir -p "${root_fs_dir}/boot/flatcar"
     sudo_clobber "${root_fs_dir}/boot/flatcar/first_boot" <<EOF
 If this file exists, Ignition will run and then delete the file.
 EOF
@@ -797,6 +783,38 @@ EOF
     sudo rm "${root_fs_dir}/etc/resolv.conf"
   fi
 
+  if [[ ${COREOS_OFFICIAL:-0} -ne 1 ]]; then
+      sudo sbsign --key /usr/share/sb_keys/shim.key \
+          --cert /usr/share/sb_keys/shim.pem \
+          --output "${root_fs_dir}/usr/boot/vmlinuz" \
+          "${root_fs_dir}/usr/boot/vmlinuz"
+  fi
+
+  if [[ -n "${image_kernel}" ]]; then
+    cp \
+        "${root_fs_dir}/usr/boot/vmlinuz" \
+        "${BUILD_DIR}/${image_kernel}"
+  fi
+
+  if [[ -n "${pcr_policy}" ]]; then
+    mkdir -p "${BUILD_DIR}/pcrs"
+    ${BUILD_LIBRARY_DIR}/generate_kernel_hash.py \
+        "${root_fs_dir}/usr/boot/vmlinuz" ${FLATCAR_VERSION} \
+        >"${BUILD_DIR}/pcrs/kernel.config"
+  fi
+
+  if [[ -n "${image_initrd_contents}" ]] || [[ -n "${image_initrd_contents_wtd}" ]]; then
+      "${BUILD_LIBRARY_DIR}/extract-initramfs-from-vmlinuz.sh" "${root_fs_dir}/usr/boot/vmlinuz" "${BUILD_DIR}/tmp_initrd_contents"
+      if [[ -n "${image_initrd_contents}" ]]; then
+          write_contents "${BUILD_DIR}/tmp_initrd_contents" "${BUILD_DIR}/${image_initrd_contents}"
+      fi
+
+      if [[ -n "${image_initrd_contents_wtd}" ]]; then
+          write_contents_with_technical_details "${BUILD_DIR}/tmp_initrd_contents" "${BUILD_DIR}/${image_initrd_contents_wtd}"
+      fi
+      rm -rf "${BUILD_DIR}/tmp_initrd_contents"
+  fi
+
   # Zero all fs free space to make it more compressible so auto-update
   # payloads become smaller, not fatal since it won't work on linux < 3.2
   sudo fstrim "${root_fs_dir}" || true
@@ -812,38 +830,6 @@ EOF
     "${BUILD_LIBRARY_DIR}/disk_util" --disk_layout="${disk_layout}" verity \
         --root_hash="${BUILD_DIR}/${image_name%.bin}_verity.txt" \
         "${BUILD_DIR}/${image_name}"
-
-    # Magic alert!  Root hash injection works by writing the hash value to a
-    # known unused SHA256-sized location in the kernel image.
-    # For amd64 the rdev error message is used.
-    # For arm64 an area between the EFI headers and the kernel text is used.
-    # Our modified GRUB extracts the hash and adds it to the cmdline.
-    printf %s "$(cat ${BUILD_DIR}/${image_name%.bin}_verity.txt)" | \
-        sudo dd of="${root_fs_dir}/boot/flatcar/vmlinuz-a" conv=notrunc \
-        seek=${verity_offset} count=64 bs=1 status=none
-  fi
-
-  # Sign the kernel after /usr is in a consistent state and verity is calculated
-  if [[ ${COREOS_OFFICIAL:-0} -ne 1 ]]; then
-      sudo sbsign --key /usr/share/sb_keys/shim.key \
-	   --cert /usr/share/sb_keys/shim.pem \
-	   "${root_fs_dir}/boot/flatcar/vmlinuz-a"
-      sudo mv "${root_fs_dir}/boot/flatcar/vmlinuz-a.signed" \
-	   "${root_fs_dir}/boot/flatcar/vmlinuz-a"
-  fi
-
-  if [[ -n "${image_kernel}" ]]; then
-    # copying kernel from vfat so ignore the permissions
-    cp --no-preserve=mode \
-        "${root_fs_dir}/boot/flatcar/vmlinuz-a" \
-        "${BUILD_DIR}/${image_kernel}"
-  fi
-
-  if [[ -n "${pcr_policy}" ]]; then
-    mkdir -p "${BUILD_DIR}/pcrs"
-    ${BUILD_LIBRARY_DIR}/generate_kernel_hash.py \
-        "${root_fs_dir}/boot/flatcar/vmlinuz-a" ${FLATCAR_VERSION} \
-        >"${BUILD_DIR}/pcrs/kernel.config"
   fi
 
   rm -rf "${BUILD_DIR}"/configroot
@@ -852,7 +838,7 @@ EOF
 
   # This script must mount the ESP partition differently, so run it after unmount
   if [[ "${install_grub}" -eq 1 ]]; then
-    local target
+    local target usr_size
     local target_list="i386-pc x86_64-efi x86_64-xen"
     if [[ ${BOARD} == "arm64-usr" ]]; then
       target_list="arm64-efi"
@@ -860,8 +846,10 @@ EOF
     local grub_args=()
     if [[ ${disable_read_write} -eq ${FLAGS_TRUE} ]]; then
       grub_args+=(--verity)
+      usr_size=$("${BUILD_LIBRARY_DIR}/disk_util" --disk_layout="${disk_layout}" readfssize 3)
     else
       grub_args+=(--noverity)
+      usr_size=
     fi
     if [[ -n "${image_grub}" && -n "${image_shim}" ]]; then
       grub_args+=(
@@ -874,6 +862,8 @@ EOF
           --board="${BOARD}" \
           --target="${target}" \
           --disk_image="${disk_img}" \
+          --root_hash="${BUILD_DIR}/${image_name%.bin}_verity.txt" \
+          --usr_size="${usr_size}" \
           "${grub_args[@]}"
     done
   fi
@@ -896,18 +886,6 @@ EOF
 
   write_contents "${root_fs_dir}" "${BUILD_DIR}/${image_contents}"
   write_contents_with_technical_details "${root_fs_dir}" "${BUILD_DIR}/${image_contents_wtd}"
-
-  if [[ -n "${image_initrd_contents}" ]] || [[ -n "${image_initrd_contents_wtd}" ]]; then
-      "${BUILD_LIBRARY_DIR}/extract-initramfs-from-vmlinuz.sh" "${root_fs_dir}/boot/flatcar/vmlinuz-a" "${BUILD_DIR}/tmp_initrd_contents"
-      if [[ -n "${image_initrd_contents}" ]]; then
-          write_contents "${BUILD_DIR}/tmp_initrd_contents" "${BUILD_DIR}/${image_initrd_contents}"
-      fi
-
-      if [[ -n "${image_initrd_contents_wtd}" ]]; then
-          write_contents_with_technical_details "${BUILD_DIR}/tmp_initrd_contents" "${BUILD_DIR}/${image_initrd_contents_wtd}"
-      fi
-      rm -rf "${BUILD_DIR}/tmp_initrd_contents"
-  fi
 
   if [[ -n "${image_disk_space_usage}" ]]; then
       write_disk_space_usage "${root_fs_dir}" "${BUILD_DIR}/${image_disk_space_usage}"

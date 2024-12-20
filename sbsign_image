@@ -64,6 +64,7 @@ mkdir -p "${BUILD_DIR}"
 DISK_LAYOUT="${FLAGS_disk_layout:-base}"
 
 fix_mtab
+set -x
 sbsign_prod_image "${FLATCAR_PRODUCTION_IMAGE_NAME}" "${DISK_LAYOUT}"
 generate_update "${FLATCAR_PRODUCTION_IMAGE_NAME}" "${DISK_LAYOUT}"
 

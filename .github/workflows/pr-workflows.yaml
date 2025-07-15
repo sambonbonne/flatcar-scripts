@@ -1,6 +1,9 @@
 name: "Run PR workflows"
 on:
   pull_request:
+  push:
+    branches:
+      - "feature/test-alpine-config"
 
 permissions:
   pull-requests: write

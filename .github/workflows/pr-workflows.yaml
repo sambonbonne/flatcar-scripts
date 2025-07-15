@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "feature/test-alpine-config"
+      - "feature/test-arch-config"
 
 permissions:
   pull-requests: write
